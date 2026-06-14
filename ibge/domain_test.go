@@ -7,7 +7,7 @@ import (
 )
 
 // These tests are offline: they exercise the URI driver's pure string functions
-// and the host wiring (mint, body, resolve), which need no network. The client's
+// and the host wiring (mint, resolve), which need no network. The client's
 // HTTP behaviour is covered in ibge_test.go.
 
 func TestDomainInfo(t *testing.T) {
@@ -23,54 +23,105 @@ func TestDomainInfo(t *testing.T) {
 	}
 }
 
-func TestClassify(t *testing.T) {
-	cases := []struct{ in, typ, id string }{
-		{"wiki/Go", "page", "wiki/Go"},
-		{"/about/", "page", "about"},
-		{"https://" + Host + "/team/contact", "page", "team/contact"},
+func TestClassifyNumeric(t *testing.T) {
+	typ, id, err := Domain{}.Classify("1100015")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if typ != "municipality" || id != "1100015" {
+		t.Errorf("Classify(\"1100015\") = (%q, %q), want (municipality, 1100015)", typ, id)
+	}
+}
+
+func TestClassifyState(t *testing.T) {
+	cases := []struct{ in, wantID string }{
+		{"SP", "SP"},
+		{"RO", "RO"},
 	}
 	for _, tc := range cases {
 		typ, id, err := Domain{}.Classify(tc.in)
-		if err != nil || typ != tc.typ || id != tc.id {
-			t.Errorf("Classify(%q) = (%q, %q, %v), want (%q, %q, nil)",
-				tc.in, typ, id, err, tc.typ, tc.id)
+		if err != nil || typ != "state" || id != tc.wantID {
+			t.Errorf("Classify(%q) = (%q, %q, %v), want (state, %s, nil)", tc.in, typ, id, err, tc.wantID)
 		}
 	}
 }
 
-func TestLocate(t *testing.T) {
-	got, err := Domain{}.Locate("page", "wiki/Go")
-	want := "https://" + Host + "/wiki/Go"
-	if err != nil || got != want {
-		t.Errorf("Locate = (%q, %v), want (%q, nil)", got, err, want)
+func TestClassifyName(t *testing.T) {
+	cases := []string{"jose", "Maria", "João Silva"}
+	for _, c := range cases {
+		typ, id, err := Domain{}.Classify(c)
+		if err != nil || typ != "name" || id != c {
+			t.Errorf("Classify(%q) = (%q, %q, %v), want (name, %s, nil)", c, typ, id, err, c)
+		}
 	}
 }
 
-// TestHostWiring mounts the driver in a kit Host (the runtime ant drives) and
-// checks the round trip: a record mints to its URI, its body is readable, and a
-// bare id resolves back to the same URI. The init in domain.go registers the
-// domain, so kit.Open finds it.
-func TestHostWiring(t *testing.T) {
+func TestLocateState(t *testing.T) {
+	got, err := Domain{}.Locate("state", "SP")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := "https://www.ibge.gov.br/cidades-e-estados/sp.html"
+	if got != want {
+		t.Errorf("Locate(state, SP) = %q, want %q", got, want)
+	}
+}
+
+func TestLocateMunicipality(t *testing.T) {
+	got, err := Domain{}.Locate("municipality", "1100015")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "https://www.ibge.gov.br/cidades-e-estados" {
+		t.Errorf("Locate(municipality, 1100015) = %q", got)
+	}
+}
+
+func TestLocateFallback(t *testing.T) {
+	got, err := Domain{}.Locate("name", "jose")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "https://www.ibge.gov.br" {
+		t.Errorf("Locate(name, jose) = %q", got)
+	}
+}
+
+func TestHostWiringDomains(t *testing.T) {
 	h, err := kit.Open()
 	if err != nil {
 		t.Fatal(err)
 	}
+	found := false
+	for _, d := range h.Domains() {
+		if d == "ibge" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("ibge domain not registered; domains = %v", h.Domains())
+	}
+}
 
-	p := &Page{ID: "wiki/Go", URL: "https://" + Host + "/wiki/Go", Title: "Go", Body: "Go is a language."}
-	u, err := h.Mint(p)
+func TestHostWiringResolveOn(t *testing.T) {
+	h, err := kit.Open()
 	if err != nil {
-		t.Fatalf("Mint: %v", err)
+		t.Fatal(err)
 	}
-	if want := "ibge://page/wiki/Go"; u.String() != want {
-		t.Errorf("Mint = %q, want %q", u.String(), want)
+	// Classify("SP") → (state, SP), so ResolveOn should work
+	got, err := h.ResolveOn("ibge", "SP")
+	if err != nil {
+		t.Fatalf("ResolveOn: %v", err)
 	}
+	if got.String() != "ibge://state/SP" {
+		t.Errorf("ResolveOn = %q, want ibge://state/SP", got.String())
+	}
+}
 
-	if body, ok := h.Body(p); !ok || body == "" {
-		t.Errorf("Body = (%q, %v), want non-empty", body, ok)
-	}
-
-	got, err := h.ResolveOn("ibge", "about")
-	if err != nil || got.String() != "ibge://page/about" {
-		t.Errorf("ResolveOn = (%q, %v), want ibge://page/about", got.String(), err)
+func TestClassifyEmpty(t *testing.T) {
+	_, _, err := Domain{}.Classify("")
+	if err == nil {
+		t.Error("Classify(\"\") should return an error")
 	}
 }

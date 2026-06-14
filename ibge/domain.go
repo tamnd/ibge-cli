@@ -2,8 +2,9 @@ package ibge
 
 import (
 	"context"
-	"net/url"
+	"fmt"
 	"strings"
+	"unicode"
 
 	"github.com/tamnd/any-cli/kit"
 	"github.com/tamnd/any-cli/kit/errs"
@@ -19,9 +20,6 @@ import (
 // ibge:// URIs by routing to the operations Register installs. The same
 // Domain also builds the standalone ibge binary (see cli.NewApp), so the
 // binary and a host share one source of truth.
-//
-// This is the scaffold's starting point: one resource type, "page", served by a
-// resolver op and a list op. Add your real types here as you model the site.
 func init() { kit.Register(Domain{}) }
 
 // Domain is the ibge driver. It carries no state; the per-run client is
@@ -36,40 +34,66 @@ func (Domain) Info() kit.DomainInfo {
 		Hosts:  []string{Host},
 		Identity: kit.Identity{
 			Binary: "ibge",
-			Short:  "A command line for ibge.",
-			Long: `A command line for ibge.
+			Short:  "A command line for the IBGE public API.",
+			Long: `A command line for the IBGE (Brazilian Institute of Geography and Statistics)
+public API at servicodados.ibge.gov.br.
 
-ibge reads public ibge data over plain HTTPS, shapes it into
-clean records, and prints output that pipes into the rest of your tools. No API
-key, nothing to run alongside it.`,
-			Site: Host,
+ibge reads states, regions, municipalities, name-frequency data, and news
+over plain HTTPS, shapes it into clean records, and prints output that pipes
+into the rest of your tools. No API key, nothing to run alongside it.`,
+			Site: "www.ibge.gov.br",
 			Repo: "https://github.com/tamnd/ibge-cli",
 		},
 	}
 }
 
-// Register installs the client factory and every operation onto app. A resolver
-// op (Single) names its own record type and answers `ant get`; a List op
-// enumerates a parent resource's members and answers `ant ls`.
+// Register installs the client factory and every operation onto app.
 func (Domain) Register(app *kit.App) {
 	app.SetClient(newClient)
 
-	// Resolver op: one record per id, the home of `ibge page` and
-	// `ant get ibge://page/<id>`.
-	kit.Handle(app, kit.OpMeta{Name: "page", Group: "read", Single: true,
-		Summary: "Fetch a page by path or URL", URIType: "page", Resolver: true,
-		Args: []kit.Arg{{Name: "ref", Help: "page path or URL"}}}, getPage)
+	kit.Handle(app, kit.OpMeta{
+		Name:    "states",
+		Group:   "geography",
+		List:    true,
+		Summary: "List all 27 Brazilian states",
+		URIType: "state",
+	}, listStates)
 
-	// List op: members of a page, the home of `ibge links` and `ant ls`.
-	// It emits page stubs, so every listed member is itself an addressable
-	// ibge://page/ URI a host can follow.
-	kit.Handle(app, kit.OpMeta{Name: "links", Group: "read", List: true,
-		Summary: "List the pages a page links to", URIType: "page",
-		Args: []kit.Arg{{Name: "ref", Help: "page path or URL"}}}, listLinks)
+	kit.Handle(app, kit.OpMeta{
+		Name:    "regions",
+		Group:   "geography",
+		List:    true,
+		Summary: "List the 5 Brazilian macro-regions",
+		URIType: "region",
+	}, listRegions)
+
+	kit.Handle(app, kit.OpMeta{
+		Name:    "municipalities",
+		Group:   "geography",
+		List:    true,
+		Summary: "List Brazilian municipalities, optionally filtered by state",
+		URIType: "municipality",
+	}, listMunicipalities)
+
+	kit.Handle(app, kit.OpMeta{
+		Name:    "names",
+		Group:   "census",
+		List:    true,
+		Summary: "Show census frequency data for a name across Brazil",
+		URIType: "name",
+		Args:    []kit.Arg{{Name: "name", Help: "name to search frequency for"}},
+	}, listNames)
+
+	kit.Handle(app, kit.OpMeta{
+		Name:    "news",
+		Group:   "news",
+		List:    true,
+		Summary: "List recent IBGE news",
+		URIType: "news",
+	}, listNews)
 }
 
-// newClient builds the client from the host-resolved config, so a host and the
-// standalone binary pace and identify themselves the same way.
+// newClient builds the client from the host-resolved config.
 func newClient(_ context.Context, cfg kit.Config) (any, error) {
 	c := NewClient()
 	if cfg.UserAgent != "" {
@@ -87,87 +111,159 @@ func newClient(_ context.Context, cfg kit.Config) (any, error) {
 	return c, nil
 }
 
-// --- inputs ---
-//
-// Each handler takes a typed input struct. kit fills the fields from the tags:
-// kit:"arg" is a positional argument, kit:"flag,inherit" binds the framework's
-// shared flag of the same name, and kit:"inject" receives the client newClient
-// builds.
+// ---------------------------------------------------------------------------
+// Input structs
+// ---------------------------------------------------------------------------
 
-type pageRef struct {
-	Ref    string  `kit:"arg" help:"page path or URL"`
+type statesInput struct {
 	Client *Client `kit:"inject"`
 }
 
-type listRef struct {
-	Ref    string  `kit:"arg" help:"page path or URL"`
-	Limit  int     `kit:"flag,inherit" help:"max results"`
+type regionsInput struct {
 	Client *Client `kit:"inject"`
 }
 
-// --- handlers ---
-
-func getPage(ctx context.Context, in pageRef, emit func(*Page) error) error {
-	p, err := in.Client.GetPage(ctx, pagePath(in.Ref))
-	if err != nil {
-		return mapErr(err)
-	}
-	return emit(p)
+type municipalitiesInput struct {
+	State  string  `kit:"flag" help:"state code e.g. SP"`
+	Limit  int     `kit:"flag,inherit" help:"max results" default:"20"`
+	Client *Client `kit:"inject"`
 }
 
-func listLinks(ctx context.Context, in listRef, emit func(*Page) error) error {
-	pages, err := in.Client.PageLinks(ctx, pagePath(in.Ref), in.Limit)
+type namesInput struct {
+	Name   string  `kit:"arg" help:"name to search frequency for"`
+	Client *Client `kit:"inject"`
+}
+
+type newsInput struct {
+	Limit  int     `kit:"flag,inherit" help:"max news items" default:"5"`
+	Client *Client `kit:"inject"`
+}
+
+// ---------------------------------------------------------------------------
+// Handlers
+// ---------------------------------------------------------------------------
+
+func listStates(ctx context.Context, in statesInput, emit func(*State) error) error {
+	states, err := in.Client.GetStates(ctx)
 	if err != nil {
 		return mapErr(err)
 	}
-	for _, p := range pages {
-		if err := emit(p); err != nil {
+	for _, s := range states {
+		if err := emit(s); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// --- Resolver: the URI-native string functions, pure and network-free ---
-
-// Classify turns any accepted input — a bare path or a full ibge.com URL —
-// into the canonical (type, id), so `ant resolve` and `ant url` touch no network.
-func (Domain) Classify(input string) (uriType, id string, err error) {
-	id = pagePath(input)
-	if id == "" {
-		return "", "", errs.Usage("unrecognized ibge reference: %q", input)
+func listRegions(ctx context.Context, in regionsInput, emit func(*Region) error) error {
+	regions, err := in.Client.GetRegions(ctx)
+	if err != nil {
+		return mapErr(err)
 	}
-	return "page", id, nil
+	for _, r := range regions {
+		if err := emit(r); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func listMunicipalities(ctx context.Context, in municipalitiesInput, emit func(*Municipality) error) error {
+	munis, err := in.Client.GetMunicipalities(ctx, in.State, in.Limit)
+	if err != nil {
+		return mapErr(err)
+	}
+	for _, m := range munis {
+		if err := emit(m); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func listNames(ctx context.Context, in namesInput, emit func(*NameFrequency) error) error {
+	freqs, err := in.Client.GetNameFrequency(ctx, in.Name)
+	if err != nil {
+		return mapErr(err)
+	}
+	for _, f := range freqs {
+		if err := emit(f); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func listNews(ctx context.Context, in newsInput, emit func(*News) error) error {
+	items, err := in.Client.GetNews(ctx, in.Limit)
+	if err != nil {
+		return mapErr(err)
+	}
+	for _, n := range items {
+		if err := emit(n); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Resolver: pure string functions, network-free
+// ---------------------------------------------------------------------------
+
+// Classify turns any accepted input into the canonical (type, id).
+// - numeric string → ("municipality", id)
+// - 2-letter uppercase → ("state", code)
+// - otherwise → ("name", name)
+func (Domain) Classify(input string) (uriType, id string, err error) {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return "", "", errs.Usage("empty ibge reference")
+	}
+	if isNumeric(input) {
+		return "municipality", input, nil
+	}
+	if len(input) == 2 && isUpperAlpha(input) {
+		return "state", input, nil
+	}
+	return "name", input, nil
 }
 
 // Locate is the inverse: the live https URL for a (type, id).
 func (Domain) Locate(uriType, id string) (string, error) {
-	if uriType != "page" {
-		return "", errs.Usage("ibge has no resource type %q", uriType)
+	switch uriType {
+	case "state":
+		return fmt.Sprintf("https://www.ibge.gov.br/cidades-e-estados/%s.html", strings.ToLower(id)), nil
+	case "municipality":
+		return "https://www.ibge.gov.br/cidades-e-estados", nil
+	default:
+		return "https://www.ibge.gov.br", nil
 	}
-	return BaseURL + "/" + strings.Trim(id, "/"), nil
 }
 
-// --- helpers ---
+// ---------------------------------------------------------------------------
+// helpers
+// ---------------------------------------------------------------------------
 
-// pagePath turns any accepted input into the canonical page id: the path of a
-// full URL on this host, or a bare path with its slashes trimmed.
-func pagePath(input string) string {
-	input = strings.TrimSpace(input)
-	if u, err := url.Parse(input); err == nil && (u.Scheme == "http" || u.Scheme == "https") {
-		return strings.Trim(u.Path, "/")
+func isNumeric(s string) bool {
+	for _, r := range s {
+		if !unicode.IsDigit(r) {
+			return false
+		}
 	}
-	return strings.Trim(input, "/")
+	return true
 }
 
-// mapErr converts a library error into the kit error kind that carries the right
-// exit code, so a host renders the same outcomes the standalone binary does. As
-// you add sentinel errors to the library, map them here, for example:
-//
-//	case errors.Is(err, ErrNotFound):
-//		return errs.NotFound("%s", err.Error())
-//	case errors.Is(err, ErrRateLimited):
-//		return errs.RateLimited("%s", err.Error())
+func isUpperAlpha(s string) bool {
+	for _, r := range s {
+		if !unicode.IsUpper(r) || !unicode.IsLetter(r) {
+			return false
+		}
+	}
+	return true
+}
+
 func mapErr(err error) error {
 	return err
 }
