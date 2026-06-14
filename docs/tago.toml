@@ -1,0 +1,10 @@
+title       = "ibge"
+baseURL     = "https://ibge-cli.tamnd.com/"
+description = "A command line for ibge."
+contentDir  = "content"
+outputDir   = "public"
+theme       = "tago-doks"
+syntaxHighlight = "true"
+
+[params]
+github = "https://github.com/tamnd/ibge-cli"
